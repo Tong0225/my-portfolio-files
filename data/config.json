@@ -1,1 +1,12 @@
-{"siteTitle":"个人作品展示","siteDescription":"记录每一个创意瞬间","adminPassword":"admin123","requirePasswordLogin":true,"requirePasswordUpload":true,"requirePasswordDelete":true,"categories":{"设计作品":["海报设计","UI设计","平面设计"],"视频作品":["宣传片","短片","微电影"],"文档资料":["策划案","方案","报告"]}}
+{
+  "siteTitle": "个人作品展示",
+  "siteDescription": "记录每一个创意瞬间",
+  "adminPassword": "admin123",
+  "requirePasswordLogin": true,
+  "requirePasswordUpload": true,
+  "requirePasswordDelete": true,
+  "categories": {
+    "视频作品": [],
+    "文档资料": []
+  }
+}
