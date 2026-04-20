@@ -1,12 +1,65 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile, writeFile, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
-import path from 'path';
-import { randomUUID } from 'crypto';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const WORKS_FILE = path.join(DATA_DIR, 'works.json');
-const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const GITHUB_OWNER = 'Tong0225';
+const GITHUB_REPO = 'my-portfolio-files';
+const GITHUB_BRANCH = 'main';
+const WORKS_PATH = 'data/works.json';
+
+async function githubRequest(endpoint: string, options: RequestInit = {}) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    throw new Error('GITHUB_TOKEN not configured');
+  }
+  
+  const response = await fetch(`https://api.github.com${endpoint}`, {
+    ...options,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...options.headers,
+    },
+  });
+  
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.status}`);
+  }
+  
+  return response.json();
+}
+
+async function getFileContent(filePath: string): Promise<string | null> {
+  try {
+    const data = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filePath}?ref=${GITHUB_BRANCH}`);
+    if (data.content) {
+      return Buffer.from(data.content, 'base64').toString('utf-8');
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveFileContent(filePath: string, content: string, message: string) {
+  const existing = await getFileContent(filePath);
+  const encoded = Buffer.from(content).toString('base64');
+  
+  const body: Record<string, unknown> = {
+    message,
+    content: encoded,
+    branch: GITHUB_BRANCH,
+  };
+  
+  if (existing !== null) {
+    const currentData = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filePath}?ref=${GITHUB_BRANCH}`);
+    body.sha = currentData.sha;
+  }
+  
+  return githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filePath}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
 
 interface Work {
   id: string;
@@ -23,134 +76,76 @@ interface Work {
   updatedAt: number;
 }
 
-interface Config {
-  siteTitle: string;
-  siteDescription: string;
-  adminPassword: string;
-  requirePasswordLogin: boolean;
-  requirePasswordUpload: boolean;
-  requirePasswordDelete: boolean;
-  categories: Record<string, string[]>;
-  githubRepo?: string;  // GitHub仓库信息
-  githubToken?: string;  // GitHub Token
-}
-
-async function ensureDataDir() {
-  if (!existsSync(DATA_DIR)) {
-    await mkdir(DATA_DIR, { recursive: true });
-  }
-}
-
-async function getConfig(): Promise<Config> {
-  await ensureDataDir();
-  const defaultConfig: Config = {
-    siteTitle: '个人作品展示',
-    siteDescription: '记录每一个创意瞬间',
-    adminPassword: 'admin123',
-    requirePasswordLogin: true,
-    requirePasswordUpload: true,
-    requirePasswordDelete: true,
-    categories: {
-      '设计作品': ['海报设计', 'UI设计', '平面设计'],
-      '视频作品': ['宣传片', '短片', '微电影'],
-      '文档资料': ['策划案', '方案', '报告']
-    }
-  };
-  
-  if (!existsSync(CONFIG_FILE)) {
-    await writeFile(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
-    return defaultConfig;
-  }
-  
-  const data = await readFile(CONFIG_FILE, 'utf-8');
-  return { ...defaultConfig, ...JSON.parse(data) };
-}
-
-// 获取所有作品
+// GET - 获取所有作品
 export async function GET() {
   try {
-    await ensureDataDir();
-    if (!existsSync(WORKS_FILE)) {
-      return NextResponse.json({ success: true, works: [] });
-    }
-    const data = await readFile(WORKS_FILE, 'utf-8');
-    return NextResponse.json({ success: true, works: JSON.parse(data) });
+    const content = await getFileContent(WORKS_PATH);
+    const works: Work[] = content ? JSON.parse(content) : [];
+    return NextResponse.json({ success: true, works });
   } catch (error) {
     console.error('Get works error:', error);
-    return NextResponse.json({ success: false, error: '获取作品失败' }, { status: 500 });
+    return NextResponse.json({ success: true, works: [] });
   }
 }
 
-// 添加作品
+// POST - 添加/更新作品
 export async function POST(request: NextRequest) {
   try {
-    const work = await request.json() as Work;
+    const work: Work = await request.json();
     
     if (!work.title || !work.mainCategory || !work.type) {
       return NextResponse.json({ success: false, error: '缺少必要字段' }, { status: 400 });
     }
     
-    await ensureDataDir();
     let works: Work[] = [];
-    if (existsSync(WORKS_FILE)) {
-      const data = await readFile(WORKS_FILE, 'utf-8');
-      works = JSON.parse(data);
+    const existingContent = await getFileContent(WORKS_PATH);
+    if (existingContent) {
+      works = JSON.parse(existingContent);
     }
     
-    const newWork: Work = {
-      id: work.id || `work_${randomUUID()}`,
-      title: work.title,
-      description: work.description || '',
-      mainCategory: work.mainCategory,
-      subCategory: work.subCategory || '',
-      type: work.type,
-      fileUrl: work.fileUrl || '',
-      fileName: work.fileName || '',
-      fileSize: work.fileSize || 0,
-      videoPlatform: work.videoPlatform,
-      createdAt: work.createdAt || Date.now(),
-      updatedAt: Date.now()
-    };
+    const existingIndex = works.findIndex(w => w.id === work.id);
+    let savedWork: Work;
     
-    // 检查是否编辑现有作品
-    const existingIndex = works.findIndex(w => w.id === newWork.id);
     if (existingIndex >= 0) {
-      works[existingIndex] = newWork;
+      works[existingIndex] = { ...work, updatedAt: Date.now() };
+      savedWork = works[existingIndex];
     } else {
-      works.unshift(newWork);
+      savedWork = { ...work, createdAt: Date.now(), updatedAt: Date.now() };
+      works.unshift(savedWork);
     }
     
-    await writeFile(WORKS_FILE, JSON.stringify(works, null, 2));
-    return NextResponse.json({ success: true, work: newWork });
+    await saveFileContent(WORKS_PATH, JSON.stringify(works, null, 2), 'Update works');
+    
+    return NextResponse.json({ success: true, work: savedWork });
   } catch (error) {
     console.error('Add work error:', error);
-    return NextResponse.json({ success: false, error: '添加作品失败' }, { status: 500 });
+    return NextResponse.json({ success: false, error: '保存失败' }, { status: 500 });
   }
 }
 
-// 删除作品
+// DELETE - 删除作品
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
     
     if (!id) {
-      return NextResponse.json({ success: false, error: '缺少作品ID' }, { status: 400 });
+      return NextResponse.json({ success: false, error: '缺少ID' }, { status: 400 });
     }
     
-    await ensureDataDir();
-    if (!existsSync(WORKS_FILE)) {
-      return NextResponse.json({ success: false, error: '作品不存在' }, { status: 404 });
+    const content = await getFileContent(WORKS_PATH);
+    if (!content) {
+      return NextResponse.json({ success: false, error: '数据不存在' }, { status: 404 });
     }
     
-    const data = await readFile(WORKS_FILE, 'utf-8');
-    let works: Work[] = JSON.parse(data);
+    let works: Work[] = JSON.parse(content);
     works = works.filter(w => w.id !== id);
-    await writeFile(WORKS_FILE, JSON.stringify(works, null, 2));
+    
+    await saveFileContent(WORKS_PATH, JSON.stringify(works, null, 2), 'Delete work');
     
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Delete work error:', error);
-    return NextResponse.json({ success: false, error: '删除作品失败' }, { status: 500 });
+    return NextResponse.json({ success: false, error: '删除失败' }, { status: 500 });
   }
 }
